@@ -56,6 +56,7 @@ def set_device_states(devices, states) -> None:
 
 
 class CheckpointFunction(torch.autograd.Function):
+    use_amp = False
 
     @staticmethod
     def forward(ctx, run_function, preserve_rng_state, *args):
@@ -94,7 +95,7 @@ class CheckpointFunction(torch.autograd.Function):
                 if ctx.had_cuda_in_fwd:
                     set_device_states(ctx.fwd_gpu_devices, ctx.fwd_gpu_states)
             detached_inputs = detach_variable(inputs)
-            with torch.enable_grad():
+            with torch.enable_grad(enabled=CheckpointFunction.use_amp):
                 with torch.cuda.amp.autocast():
                     outputs = ctx.run_function(*detached_inputs)
 

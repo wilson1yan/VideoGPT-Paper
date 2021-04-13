@@ -36,6 +36,7 @@ Execute `python train_videogpt.py -h` for all the tunable parameters. An example
 ```
 python train_videogpt.py -o <output_dir> --cfg gpt_small --vqvae_ckpt /path/to/vqvae/ckpt --dataset bair_pushing
 ```
+You can add the `--amp` flag for automatic mixed precision training if you have the support hardware.
 
 ## Misc
 Other relevant scripts to compute FVD can be found in `scripts/`

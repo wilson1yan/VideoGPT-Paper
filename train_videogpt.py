@@ -23,6 +23,7 @@ from videogpt.train_utils import get_distributed_loaders, seed_all, get_output_d
     get_ckpt, save_checkpoint, InfDataLoader, load_model, \
     config_summary_writer, config_device, sample
 from videogpt.dist_ops import DistributedDataParallel, allreduce_avg_list, allgather
+from videogpt.layers.checkpoint import CheckpointFunction
 
 
 def main():
@@ -41,6 +42,7 @@ def main_worker(rank, size, args_in):
                             world_size=size, rank=rank)
 
     """ Config writer, seed and device """
+    CheckpointFunction.use_amp = args.amp
 
     writer = config_summary_writer(is_root=is_root, output_dir=args.output_dir)
     seed = args.seed + rank
