@@ -1,4 +1,5 @@
 import glob
+import argparse
 import h5py
 import numpy as np
 from PIL import Image
@@ -7,6 +8,7 @@ from tqdm import tqdm
 import sys
 
 def convert_data(split):
+    root_dir = opt.data_dir
     path = osp.join(root_dir, 'processed_data', split)
     traj_paths = glob.glob(osp.join(path, '*', '*'))
     trajs, actions = [], []
@@ -28,9 +30,9 @@ def convert_data(split):
     actions = np.stack(actions, axis=0) # N, T, act_dim
 
     if split == 'train':
-        fname = 'bair_pushing.hdf5'
+        fname = osp.join(root_dir, 'bair_pushing.hdf5')
     else:
-        fname = 'bair_pushing_test.hdf5'
+        fname = osp.join(root_dir, 'bair_pushing_test.hdf5')
 
     f = h5py.File(fname, 'a')
     f.create_dataset('frames', data=trajs)
@@ -41,4 +43,6 @@ def convert_data(split):
     print(f['frames'].shape, f['frames'].dtype)
     print(f['actions'].shape, f['actions'].dtype)
 
-root_dir = sys.argv[1]
+parser = argparse.ArgumentParser()
+parser.add_argument('--data_dir', default='', help='base directory to save processed data')
+opt = parser.parse_args()

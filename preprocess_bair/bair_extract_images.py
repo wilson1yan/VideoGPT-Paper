@@ -8,8 +8,7 @@ import tensorflow as tf
 from tensorflow.python.platform import flags
 from tensorflow.python.platform import gfile
 
-from scipy.misc import imresize
-from scipy.misc import imsave
+import imageio
 
 import argparse
 parser = argparse.ArgumentParser()
@@ -34,7 +33,7 @@ def get_seq(dname):
                 byte_str = example.features.feature[image_name].bytes_list.value[0]
                 img = Image.frombytes('RGB', (64, 64), byte_str)
                 arr = np.array(img.getdata()).reshape(img.size[1], img.size[0], 3)
-                image_seq.append(arr.reshape(1, 64, 64, 3)/255.)
+                image_seq.append(arr.reshape(1, 64, 64, 3))
 
                 action_name = str(i) + '/action'
                 action = example.features.feature[action_name].float_list.value
@@ -52,12 +51,13 @@ def convert_data(dname):
         n+=1
         try:
             f, k, seq, actions = next(seq_generator)
+            seq = seq.astype('uint8')
         except StopIteration:
             break
         f = f.split('/')[-1]
         os.makedirs('%s/processed_data/%s/%s/%d/' % (opt.data_dir, dname,  f[:-10], k), exist_ok=True)
         for i in range(len(seq)):
-            imsave('%s/processed_data/%s/%s/%d/%d.png' % (opt.data_dir, dname,  f[:-10], k, i), seq[i])
+            imageio.imwrite('%s/processed_data/%s/%s/%d/%d.png' % (opt.data_dir, dname,  f[:-10], k, i), seq[i])
         np.save('%s/processed_data/%s/%s/%d/actions.npy' % (opt.data_dir, dname, f[:-10], k), actions)
 
         print('%s data: %s (%d)  (%d)' % (dname, f, k, n))
