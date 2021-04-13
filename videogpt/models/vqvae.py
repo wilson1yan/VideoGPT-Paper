@@ -16,8 +16,8 @@ from videogpt.layers.utils import shift_dim
 class VQVAE(nn.Module):
     def __init__(self, embedding_dim: int, codes_per_book: int, n_codebooks: int,
                  input_shape: tuple, downsample: tuple, num_hiddens: int, num_residual_layers: int,
-                 num_residual_hiddens: int, use_attn: bool, attn_n_heads: int, 
-                 commitment_cost: float, decay: float):
+                 num_residual_hiddens: int, use_attn: bool, attn_n_heads: int,
+                 commitment_cost: float, decay: float, cond_types): # cond_types only to match GPT args
         super().__init__()
         assert len(input_shape) == len(downsample), ('input shape', input_shape, 'ds', downsample)
 
@@ -58,7 +58,7 @@ class VQVAE(nn.Module):
         self.input_shape = input_shape
 
         self.latent_shape = (*ds_shape, n_codebooks)
-        self.embedding_shape = (embedding_dim, *ds_shape, n_codebooks)
+        self.quantized_shape = (embedding_dim, *ds_shape, n_codebooks)
 
     @property
     def metrics(self):
@@ -80,7 +80,7 @@ class VQVAE(nn.Module):
         z = self.pre_vq_conv1(self.encoder(x=x))
 
         vq_output = self.codebook(z, no_flatten=True)
-        dec_inp = vq_output['quantize']
+        dec_inp = vq_output['quantized']
         dec_inp = shift_dim(dec_inp, -1, 1).flatten(1, 2)  # -> (b, l, d, t', h', w') -> (b, l*d, t', h', w')
         x_recon = self.decoder(x=dec_inp)
 
@@ -107,12 +107,12 @@ class VQVAE(nn.Module):
         """
         z = self.pre_vq_conv1(self.encoder(x=x))
         vq_output = self.codebook(z, no_flatten=no_flatten)
-        return vq_output['embeddings'], vq_output['encodings']
+        return vq_output['quantized'], vq_output['encodings']
 
     def decode(self, x):
         x = self.codebook.dictionary_lookup(x)
-        return self._decode(x)
+        return self.decoder(x)
 
     def get_reconstruction(self, x):
-        _, encodings = self._encode(x=x)
-        return self._decode(encodings)
+        _, encodings = self.encode(x=x)
+        return self.decode(encodings)

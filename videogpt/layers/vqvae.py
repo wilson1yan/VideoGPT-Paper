@@ -182,7 +182,7 @@ class Quantize(nn.Module):
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10), dim=1))
         perplexity = perplexity.mean()
 
-        return dict(embeddings=quantized_st, encodings=enc_idxs_return,
+        return dict(quantized=quantized_st, encodings=enc_idxs_return,
                     commitment_loss=commitment_loss, perplexity=perplexity,
                     loss=loss)
 

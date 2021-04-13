@@ -1,12 +1,13 @@
-import torch.nn as nn
-from typing import Union, Tuple
-import videogpt.logger as logger
-import torch
-import torch.nn.functional as F
-from videogpt.layers.checkpoint import checkpoint
 import os
 import math
+from typing import Union, Tuple
 import numpy as np
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from videogpt.layers.checkpoint import checkpoint
 
 
 def identity(x):

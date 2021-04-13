@@ -64,7 +64,7 @@ def config_cond_types(
     if cond_hp['class_cond']:
         cond_size = (dset.n_classes,)
         cond_types.append(CondType(name='cond_class', type='affine_norm', out_size=cond_size,
-                                   preprocess_op=identity, model=None))
+                                   preprocess_op=identity, net=None))
 
     cond_types = tuple(cond_types)
 

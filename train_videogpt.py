@@ -59,30 +59,30 @@ def main_worker(rank, size, args_in):
         dset_configs = gpt_ckpt['dset_configs']
 
         # overwrite
-        args.dataset = dset_configs['dset_name']
+        args.dataset = dset_configs['dataset']
         args.resolution = dset_configs['resolution']
     else:
         gpt_ckpt = None
-        dset_configs = dict(dset_name=args.dataset, resolution=args.resolution,
+        dset_configs = dict(dataset=args.dataset, resolution=args.resolution,
                             n_frames=args.n_frames)
 
-    train_loader, test_loader, dset, ds_info = get_distributed_loaders(
+    train_loader, test_loader, dset = get_distributed_loaders(
         dset_configs=dset_configs, batch_size=args.batch_size, seed=seed
     )
     if is_root:
         print(f"dset loader n_batch: train = {len(train_loader)}, test = {len(test_loader)}")
 
     """ Load VQ-VAE """
-    vae_ckpt = args.vae_ckpt if gpt_ckpt is None else gpt_ckpt['vae_ckpt']
+    vqvae_ckpt = args.vqvae_ckpt if gpt_ckpt is None else gpt_ckpt['vqvae_ckpt']
     if is_root:
-        print(f'Loading VQ-VAE from {vae_ckpt}')
+        print(f'Loading VQ-VAE from {vqvae_ckpt}')
 
-    vae_ckpt_loaded = torch.load(vae_ckpt, map_location=device)
+    vqvae_ckpt_loaded = torch.load(vqvae_ckpt, map_location=device)
     vqvae, vq_hp = load_model(
-        ckpt=vae_ckpt_loaded,
+        ckpt=vqvae_ckpt_loaded,
         device=device, freeze_model=True, cond_types=tuple()
     )
-    del vae_ckpt_loaded
+    del vqvae_ckpt_loaded
 
     latent_shape = vqvae.latent_shape
     quantized_shape = vqvae.quantized_shape
@@ -100,8 +100,8 @@ def main_worker(rank, size, args_in):
             n_cond_frames=args.n_cond_frames,
             class_cond=args.class_cond,
             cond_init_configs=dict(
-                type=args.cond_init_type,
-                model=args.cond_init_model,
+                type='enc_attn',
+                model='resnet_v1',
                 resnet_dim=576,
                 resnet_depth=34,
                 resnet_output_shape=(1, 16, 16),
@@ -202,7 +202,7 @@ def main_worker(rank, size, args_in):
         'dset_configs': dset_configs,
         'cond_hp': cond_hp,
         'hp': hp,
-        'vae_ckpt': vae_ckpt,
+        'vqvae_ckpt': vqvae_ckpt,
     }
 
     def get_ckpt_dict(**ckpt_dict):
@@ -245,7 +245,7 @@ def main_worker(rank, size, args_in):
         cond_hp=cond_hp,
         vae=vqvae,
         prior=prior,
-        codebook=codebook, 
+        codebook=codebook,
         device=device,
         temperature=args.temperature,
         rank=rank,
@@ -446,7 +446,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0, help='random seed (default: 0')
     parser.add_argument('-o', '--output_dir', type=str, required=True)
-    parser.add_argument('-c', '--ckpt', type=str, required=False, 
+    parser.add_argument('-c', '--ckpt', type=str, required=False,
                         help='path to GPT checkpoint')
     parser.add_argument('--cfg', type=str, help='ignored when ckpt is provided')
     parser.add_argument('--vqvae_ckpt', type=str, required=False, help='path to VAE checkpoint, ignored when ckpt provided', default=None)
@@ -455,20 +455,14 @@ if __name__ == "__main__":
     # Dataset parameters
     parser.add_argument('-d', '--dataset', type=str, default='bair_pushing', help='defult: bair_pushing')
     parser.add_argument('-r', '--resolution', type=int, default=64, help='default: 64')
+    parser.add_argument('-f', '--n_frames', type=int, default=16, help='default: 16')
     parser.add_argument('--n_cond_frames', type=int, default=0,
                         help='number of frames to condition on')
     parser.add_argument('--class_cond', action='store_true', help='condition on actions')
 
-    # Conditional model parameters
-    parser.add_argument('--cond_init_model', type=str, default='resnet_v1',
-                        help='model for conditional initial frames, ' + \
-                             'resnet_v1')
-    parser.add_argument('--cond_init_type', type=str, default='enc_attn',
-                        help='enc_attn')
-
     # Training parameters
     parser.add_argument('-b', '--batch_size', type=int, default=32, help='batch size total for all gpus (default: 128)')
-    parser.add_argument('--lr', type=float, default=3e-4, help='default: 1e-3')
+    parser.add_argument('--lr', type=float, default=3e-4, help='default: 3e-4')
     parser.add_argument('-e', '--total_iters', type=int, default=200000,
                         help='default: 200000')
     parser.add_argument('--amp', action='store_true', help='Use AMP training')
@@ -476,7 +470,7 @@ if __name__ == "__main__":
     # Logging Parameters
     parser.add_argument('--test_every', type=int, default=10000, help='default: 5000')
     parser.add_argument('--generate_every', type=int, default=10000, help='default: 10000')
-    parser.add_argument('-i', '--log_interval', type=int, default=50, help='default: 50')
+    parser.add_argument('-i', '--log_interval', type=int, default=100, help='default: 100')
 
     parser.add_argument('-p', '--port', type=int, default=23455,
                         help='tcp port for distributed training (default: 23455)')
@@ -485,7 +479,7 @@ if __name__ == "__main__":
 
 
     args.ckpt = get_ckpt(args.ckpt)
-    args.vae_ckpt = get_ckpt(args.vae_ckpt)
+    args.vqvae_ckpt = get_ckpt(args.vqvae_ckpt)
     args.output_dir = get_output_dir(args.output_dir)
 
     main()

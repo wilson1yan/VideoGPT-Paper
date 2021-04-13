@@ -11,7 +11,6 @@ import torch.nn.functional as F
 from videogpt.layers.norm import LayerNorm
 from videogpt.layers.attention import SelfAttentionModel
 from videogpt.layers.utils import shift_dim, LambdaModule
-import videogpt.logger as logger
 
 MAX_SAMPLES_PER_BATCH = 32
 
@@ -145,7 +144,7 @@ class ImageGPT(nn.Module):
                     else:
                         s_inp, q_inp = samples_subset[prev_idx], quantized[prev_idx]
 
-                    logits = self(quantized=q_inp, encodings=s_inp, cond=cond_subset, decode_step=j, 
+                    logits = self(quantized=q_inp, encodings=s_inp, cond=cond_subset, decode_step=j,
                                   decode_idx=idx)['gen_logits']
                     probs = F.softmax(logits / temperature, dim=-1)
                     if probs.shape[0] == 1:

@@ -23,7 +23,7 @@ def main():
     dset_configs = ckpt['dset_configs']
 
     # Each process has full dataloader
-    train_loader, test_loader, dset, _ = get_distributed_loaders(
+    train_loader, test_loader, dset = get_distributed_loaders(
         dset_configs=dset_configs,
         batch_size=FVD_SAMPLE_SIZE, seed=seed
     )

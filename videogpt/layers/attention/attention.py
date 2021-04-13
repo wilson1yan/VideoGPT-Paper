@@ -4,8 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 
 from videogpt.utils import deepclone
-from videogpt.layers.pos_embd import BroadcastAbsolutePositionalEmbeddingND
-from videogpt.layers.utils import view_range, shift_dim, tensor_slice
+from videogpt.layers.pos_embd import BroadcastPosEmbedND
+from videogpt.layers.utils import view_range, shift_dim
 from videogpt.layers.attention.full_attention import FullAttention
 from videogpt.layers.attention.sparse_attention import SparseAttention
 
@@ -72,18 +72,18 @@ class MultiHeadAttention(nn.Module):
         self.cache = None
 
     def forward(self, q, k, v, decode_step, decode_idx):
-        """ Compute multi-head attention 
+        """ Compute multi-head attention
         Args
             q, k, v: a [b, d1, ..., dn, c] tensor or
                      a [b, 1, ..., 1, c] tensor if decode_step is not None
             decode_step: an integer representing the current sampling index in AR ordering
             decode_idx: a tuple representing the current tensor index being sampled
-        
+
         Returns
             The output after performing attention and any auxiliary losses if relevant
             (aux_loss != 0 only for routing attention)
         """
-        
+
         # compute k, q, v
         d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
         q = view_range(self.w_qs(q), -1, None, (n_head, d_k))

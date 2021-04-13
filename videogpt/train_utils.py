@@ -53,7 +53,7 @@ def get_distributed_loaders(dset_configs, batch_size, seed):
     # batch size is total batch size for all ranks
     assert batch_size % size == 0
 
-    train_dset, test_dset, ds_info = get_datasets(**dset_configs)
+    train_dset, test_dset = get_datasets(**dset_configs)
     train_sampler = data.distributed.DistributedSampler(train_dset, num_replicas=size, rank=rank, seed=seed)
     train_loader = data.DataLoader(train_dset, batch_size=batch_size // size, num_workers=4,
                                    pin_memory=True, sampler=train_sampler)
@@ -62,7 +62,7 @@ def get_distributed_loaders(dset_configs, batch_size, seed):
     test_loader = data.DataLoader(test_dset, batch_size=batch_size // size, num_workers=4,
                                   pin_memory=True, sampler=test_sampler)
 
-    return train_loader, test_loader, train_dset, ds_info
+    return train_loader, test_loader, train_dset
 
 class InfDataLoader:
 
@@ -99,7 +99,7 @@ def config_summary_writer(is_root, output_dir):
 
 
 def config_device():
-    rank = dist.get_rank()
+    rank, _ = get_rank_size()
     device = torch.device('cuda:{}'.format(rank))
     torch.cuda.set_device(rank)
 
@@ -128,7 +128,7 @@ def load_vqvae(ckpt, device, is_root, freeze_model) -> Tuple[Any, Dict[str, Any]
         print(f"VQ-VAE checkpoint iteration {ckpt['iteration']} with best loss {ckpt['best_loss']}")
 
     model, hp = config_model(
-        configs_str='', **ckpt['hp'], cond_types=None) 
+        configs_str='', **ckpt['hp'], cond_types=None)
     model = model.to(device=device)
     model.load_state_dict(ckpt['state_dict'])
 
@@ -216,7 +216,7 @@ def sample(n_samples, batch, cond_hp, vae, prior, codebook,
 
         samples = vae.decode(x=encodings)  # (n, t, h, w, l) -> (n, c, t, h, w)
         samples = (samples + 0.5).clamp(0, 1)  # in [0, 1]
-        samples = samples.detach().contiguous() 
+        samples = samples.detach().contiguous()
 
     if gather:
         samples = allgather(samples, rank, size)  # n_samples = batch_size * world_size

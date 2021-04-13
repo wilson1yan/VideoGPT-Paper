@@ -36,11 +36,11 @@ def main_worker(rank, size, args_in):
 
     prior_ckpt = torch.load(args.prior_ckpt, map_location=device)
     #################### Load VQ-VAE ########################################
-    vqvae_ckpt = torch.load(prior_ckpt['vae_ckpt'], map_location=device)
+    vqvae_ckpt = torch.load(prior_ckpt['vqvae_ckpt'], map_location=device)
 
     dset_configs = vqvae_ckpt['dset_configs']
 
-    _, test_loader, dset, _ = get_distributed_loaders(
+    _, test_loader, dset = get_distributed_loaders(
         dset_configs=dset_configs,
         batch_size=FVD_SAMPLE_SIZE, seed=seed,
     )
@@ -55,23 +55,22 @@ def main_worker(rank, size, args_in):
     #################### Load Prior ########################################
     dset_configs = prior_ckpt['dset_configs']
     cond_types, cond_hp = config_cond_types(
-        cond_hp=prior_ckpt['cond_hp'], dset=dset,
-        device=device
+        cond_hp=prior_ckpt['cond_hp'], dset=dset
     )
 
-    latent_shapes = vqvae.latent_shapes
-    quantized_sizes = vqvae.quantized_sizes
+    latent_shape = vqvae.latent_shape
+    quantized_shape = vqvae.quantized_shape
     if is_root:
-        print('latent shapes', latent_shapes)
-        print('quantized sizes', quantized_sizes)
-        print('total latents', sum([np.prod(latent_shape) for latent_shape in latent_shapes]))
+        print('latent shape', latent_shape)
+        print('quantized shape', quantized_shape)
+        print('total latents', np.prod(latent_shape))
 
     prior, hp = load_model(ckpt=prior_ckpt, device=device, freeze_model=True,
                            cond_types=cond_types)
     codebook = vqvae.codebook
 
     if is_root:
-        print(f"Loaded vqvae {prior_ckpt['vae_ckpt']} at iteration {vqvae_ckpt['iteration']}, loss = {vqvae_ckpt['best_loss']}")
+        print(f"Loaded vqvae {prior_ckpt['vqvae_ckpt']} at iteration {vqvae_ckpt['iteration']}, loss = {vqvae_ckpt['best_loss']}")
         print(f"Loaded GPT {args.prior_ckpt} at iteration {prior_ckpt['iteration']}, loss {prior_ckpt['best_loss']}")
 
     #################### Load I3D ########################################

@@ -6,8 +6,6 @@ import torch.nn.functional as F
 import torch.utils.data as data
 
 from videogpt.fvd.pytorch_i3d import InceptionI3d
-from videogpt.config_dataset import get_config
-from videogpt.train_utils import seed_all, load_vae
 import os
 
 MAX_BATCH = 16

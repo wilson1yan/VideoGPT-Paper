@@ -1,14 +1,16 @@
 import os
+import os.path as osp
+import math
 import random
 import warnings
 import pickle
 from collections import namedtuple
-import os.path as osp
 
 import h5py
 import numpy as np
 
 import torch
+import torch.nn.functional as F
 import torch.utils.data as data
 from torchvision.datasets import UCF101
 from torchvision.datasets.folder import make_dataset
@@ -17,22 +19,19 @@ from torchvision.datasets.video_utils import VideoClips
 DATA_DIR = os.environ.get("DATA_DIR", '/home/wilson/data/datasets')
 
 
-name_to_dataset = {
-    'bair_pushing': BairPushing,
-    'ucf101':  UCF101Wrapper
-}
-
-
 def get_datasets(dataset, **dset_configs):
-    try:
-        Dataset = name_to_dataset[dataset]
-        root = osp.join(DATA_DIR, dataset)
-        train_dset = Dataset(root=root, train=True, **dset_configs)
-        test_dset = Dataset(root=root, train=False, **dset_configs)
-    except:
-        raise Exception("Invalid dataset dset_name:", dataset)
+    name_to_dataset = {
+        'bair_pushing': BairPushing,
+        'ucf101':  UCF101Wrapper
+    }
+
+    Dataset = name_to_dataset[dataset]
+    root = osp.join(DATA_DIR, dataset)
+    train_dset = Dataset(root=root, train=True, **dset_configs)
+    test_dset = Dataset(root=root, train=False, **dset_configs)
     return train_dset, test_dset
-        
+
+
 class BairPushing(data.Dataset):
     def __init__(self, root, train, resolution, n_frames):
         super().__init__()
@@ -51,15 +50,15 @@ class BairPushing(data.Dataset):
         f.close()
 
         self._need_init = True
-    
+
     @property
     def input_shape(self):
         return (self.n_frames, self.resolution, self.resolution)
-    
+
     @property
     def n_classes(self):
         raise Exception('BairPushing does not support class conditioning')
-    
+
     def __len__(self):
         return self.size
 
@@ -67,11 +66,11 @@ class BairPushing(data.Dataset):
         f = h5py.File(self.fpath, 'r')
         self.frames = f['frames']
         self._need_init = False
-    
+
     def __getitem__(self, idx):
         if self._need_init:
             self._init_dset()
-        
+
         video = self.frames[idx]
         start = np.random.randint(low=0, high=video.shape[1] - self.n_frames + 1)
         video = torch.FloatTensor(video[:, start:start + self.n_frames]) / 255. - 0.5
@@ -81,7 +80,8 @@ class BairPushing(data.Dataset):
 
 class UCF101Wrapper(UCF101):
     def __init__(self, root, train, resolution, n_frames, fold=1):
-        super(UCF101, self).__init__(root)
+        video_root = osp.join(root, 'UCF-101')
+        super(UCF101, self).__init__(video_root)
         if not 1 <= fold <= 3:
             raise ValueError("fold should be between 1 and 3, got {}".format(fold))
 
@@ -89,15 +89,15 @@ class UCF101Wrapper(UCF101):
         self.fold = fold
         self.resolution = resolution
         self.n_frames = n_frames
-        self.annotation_path = os.path.join(DATA_DIR, 'ucfTrainTestlist')
-        self.classes = list(sorted(p for p in os.listdir(root) if osp.isdir(osp.join(root, p))))
+        self.annotation_path = os.path.join(root, 'ucfTrainTestlist')
+        self.classes = list(sorted(p for p in os.listdir(video_root) if osp.isdir(osp.join(video_root, p))))
         class_to_idx = {self.classes[i]: i for i in range(len(self.classes))}
-        self.samples = make_dataset(root, class_to_idx, ('avi',), is_valid_file=None)
-        video_list = [x[0] for x in samples]
+        self.samples = make_dataset(video_root, class_to_idx, ('avi',), is_valid_file=None)
+        video_list = [x[0] for x in self.samples]
 
         frames_between_clips = 1 if train else 16
         self.video_clips_fname = os.path.join(root, f'ucf_video_clips_{frames_between_clips}_{n_frames}.pkl')
-        if not os.path.exists(self.video_clips_fname):
+        if not osp.exists(self.video_clips_fname):
             video_clips = VideoClips(
                 video_paths=video_list,
                 clip_length_in_frames=n_frames,
@@ -109,7 +109,7 @@ class UCF101Wrapper(UCF101):
         else:
             with open(self.video_clips_fname, 'rb') as f:
                 video_clips = pickle.load(f)
-        indices = self._select_fold(video_list, annotation_path,
+        indices = self._select_fold(video_list, self.annotation_path,
                                     fold, train)
         self.size = video_clips.subset(indices).num_clips()
         self._need_init = True
@@ -139,7 +139,7 @@ class UCF101Wrapper(UCF101):
         warnings.filterwarnings('ignore')
 
     def _preprocess(self, video):
-        video = resize_crop(video, self.resolution, 
+        video = resize_crop(video, self.resolution,
                             'random' if self.train else 'center')
 
         if self.train and random.random() < 0.5:

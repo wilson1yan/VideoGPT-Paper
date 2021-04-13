@@ -50,34 +50,30 @@ def main_worker(rank, size, args_in):
     device = config_device()
 
     prior_ckpt = torch.load(get_ckpt(args.prior_ckpt), map_location=device)
-    vae_ckpt = torch.load(get_ckpt(prior_ckpt['vae_ckpt']), map_location=device)
+    vqvae_ckpt = torch.load(get_ckpt(prior_ckpt['vqvae_ckpt']), map_location=device)
 
     """ Load datasets """
     dset_configs = prior_ckpt['dset_configs']
     cond_hp = prior_ckpt['cond_hp']
 
-    train_loader, test_loader, dset, _ = get_distributed_loaders(
+    train_loader, test_loader, dset = get_distributed_loaders(
         dset_configs=dset_configs,
         batch_size=args.n_samples,
         seed=seed
     )
 
-    if args.split == 'train':
-        loader = train_loader
-    else:
-        loader = test_loader
+    loader = test_loader
     # shuffle the dataset according to some fixed seed
     loader.sampler.set_epoch(seed)
     batch = next(iter(loader)) # get batch as early as possible for fixed seed sampling examples
 
-    vqvae, vq_hp = load_model(ckpt=vae_ckpt, device=device, freeze_model=True,
+    vqvae, vq_hp = load_model(ckpt=vqvae_ckpt, device=device, freeze_model=True,
                               cond_types=())
 
     def load_layer_prior(ckpt):
         # must use the same self_gen_types for vae and all prior layers
         cond_types, cond_hp = config_cond_types(
-            cond_hp=ckpt['cond_hp'], dset=dset,
-            device=device)
+            cond_hp=ckpt['cond_hp'], dset=dset)
         # freeze all previous priors, not the current one
         prior, hp = load_model(
             ckpt=ckpt, device=device, freeze_model=True,
@@ -96,7 +92,7 @@ def main_worker(rank, size, args_in):
 
     prior, prior_hp, codebook = load_layer_prior(prior_ckpt)
     if is_root:
-        print(f"Loaded vqvae at iteration {vae_ckpt['iteration']}, loss = {vae_ckpt['best_loss']}")
+        print(f"Loaded vqvae at iteration {vqvae_ckpt['iteration']}, loss = {vqvae_ckpt['best_loss']}")
         print(f"Loaded GPT at iteration {prior_ckpt['iteration']}, loss {prior_ckpt['best_loss']}")
 
     """ Generate samples """
@@ -116,7 +112,7 @@ def main_worker(rank, size, args_in):
                                                 gather=True)
 
     if is_root:
-        print(gathered_samples.shape)
+        os.makedirs(args.output_dir, exist_ok=True)
         # (n, c, t, h, w) -> (n, t, c, h, w)
         samples = shift_dim(gathered_samples, 2, 1)
         T = samples.shape[1]
@@ -142,10 +138,8 @@ if __name__ == '__main__':
     parser.add_argument('-n', '--n_samples', type=int, default=16)
     parser.add_argument('-t', '--temperature', type=float, default=1.0)
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--split', type=str, default='test')
     parser.add_argument('--port', type=int, default=23456)
 
     args = parser.parse_args()
-    assert args.split in ['train', 'test']
 
     main()

@@ -65,14 +65,15 @@ def main_worker(rank, size, args_in):
         dset_configs = ckpt['dset_configs']
 
         # overwrite args
-        args.dataset = dset_configs['dset_name']
+        args.dataset = dset_configs['dataset']
         args.resolution = dset_configs['resolution']
+        args.n_frames = dset_configs['n_frames']
     else:
-        dset_configs = dict(dset_name=args.dataset,
+        dset_configs = dict(dataset=args.dataset,
                             resolution=args.resolution,
                             n_frames=args.n_frames)
 
-    train_loader, test_loader, dset, _ = get_distributed_loaders(
+    train_loader, test_loader, dset = get_distributed_loaders(
         dset_configs=dset_configs, batch_size=args.batch_size, seed=seed
     )
 
@@ -92,9 +93,6 @@ def main_worker(rank, size, args_in):
     else:
         model, hp = config_model(
             configs_str=args.cfg,
-            channel_in=dset.n_channels,
-            channel_out=dset.n_channels,
-            mse_norm=dset.mse_norm,
             input_shape=dset.input_shape,
             cond_types=tuple(),
         )
@@ -113,13 +111,13 @@ def main_worker(rank, size, args_in):
         x = batch['video']
         x = x.to(device, non_blocking=True)
 
-        return dict(x=x) 
+        return dict(x=x)
 
     if is_root:
         total_latents = np.prod(model.latent_shape)
         print('total latents', total_latents)
-        print('input shape', model.input_shape, 
-              'latent shape', model.latent_shape, 
+        print('input shape', model.input_shape,
+              'latent shape', model.latent_shape,
               'not flattened quantized shape', model.quantized_shape)
 
     # build optimizer
@@ -308,16 +306,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-s', '--seed', type=int, default=0)
     parser.add_argument('-d', '--dataset', type=str, default='bair_pushing',
-                        help='moving_mnist|bair_pushing|vizdoom|ucf101 (default: moving_mnist), ignored if ckpt is provided')
+                        help='bair_pushing|ucf101 (default: bair_pushing), ignored if ckpt is provided')
     parser.add_argument('--resolution', type=int, default=64)
+    parser.add_argument('--n_frames', type=int, default=16)
     parser.add_argument('-o', '--output_dir', type=str, default=None)
     parser.add_argument('-c', '--ckpt', type=str, default=None)
 
     # Training parameters
     parser.add_argument('-b', '--batch_size', type=int, default=32, help='default: 32')
-    parser.add_argument('-e', '--total_iters', type=int, default=200000, help='default: 200000')
+    parser.add_argument('-e', '--total_iters', type=int, default=100000, help='default: 100000')
     parser.add_argument('--lr', type=float, default=3e-4, help='default: 3e-4')
-    parser.add_argument('-i', '--log_interval', type=int, default=50, help='default: 50')
+    parser.add_argument('-i', '--log_interval', type=int, default=100, help='default: 100')
     parser.add_argument('-t', '--test_every', type=int, default=10000)
     parser.add_argument('-r', '--recon_every', type=int, default=10000)
 

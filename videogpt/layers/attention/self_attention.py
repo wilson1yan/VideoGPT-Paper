@@ -11,7 +11,6 @@ from videogpt.layers.attention.attention import MultiHeadAttention, EncoderAtten
 from videogpt.layers.right_shift import RightShiftSequence
 from videogpt.layers.pos_embd import BroadcastPosEmbedND
 from videogpt.layers.utils import view_range, shift_dim, tensor_slice, LambdaModule
-import videogpt.logger as logger
 
 
 class SelfAttentionLayer(nn.Module):
@@ -139,7 +138,7 @@ class SelfAttentionModel(nn.Module):
             decode_idx: the idx representing the location of the element being sampled
         """
         x = self.pre_pos_embd(x, decode_step, decode_idx)
-        pos_embd = self.pos_embd(x=x) 
+        pos_embd = self.pos_embd(x=x)
 
         if decode_step is not None:
             pos_embd = tensor_slice(pos_embd, [0, *decode_idx, 0],

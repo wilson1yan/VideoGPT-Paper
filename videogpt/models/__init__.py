@@ -1,2 +1,2 @@
 from .gpt import ImageGPT
-from .vae import VQVAE
+from .vqvae import VQVAE
