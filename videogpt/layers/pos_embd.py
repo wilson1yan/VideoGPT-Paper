@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
-from videogpt.layers.utils import LambdaModule
 
-
-class BroadcastAbsolutePositionalEmbeddingND(nn.Module):
+class BroadcastPosEmbedND(nn.Module):
     def __init__(self, shape, embd_dim):
         super().__init__()
         self.shape = shape

@@ -10,14 +10,20 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import torch.utils.data as data
+import torch.distributed as dist
 
-import videogpt.logger as logger
 from videogpt.config_model import config_model
-from videogpt.config_dataset import get_config
-from videogpt.common import SHAPE_THWL, SHAPE_THW, D_SHAPE_THWL
+from videogpt.dataset import get_datasets
 from videogpt.utils import chunk
 from videogpt.dist_ops import allgather
 from videogpt.layers.utils import shift_dim
+
+
+def get_rank_size():
+    if dist.is_initialized():
+        return dist.get_rank(), dist.get_world_size()
+    else:
+        return 0, 1
 
 
 def get_ckpt(ckpt):
@@ -42,11 +48,12 @@ def get_output_dir(output_dir):
     return output_dir
 
 
-def get_distributed_loaders(dset_configs, batch_size, size, rank, seed):
+def get_distributed_loaders(dset_configs, batch_size, seed):
+    rank, size = get_rank_size()
     # batch size is total batch size for all ranks
     assert batch_size % size == 0
 
-    train_dset, test_dset, ds_info = get_config(**dset_configs)
+    train_dset, test_dset, ds_info = get_datasets(**dset_configs)
     train_sampler = data.distributed.DistributedSampler(train_dset, num_replicas=size, rank=rank, seed=seed)
     train_loader = data.DataLoader(train_dset, batch_size=batch_size // size, num_workers=4,
                                    pin_memory=True, sampler=train_sampler)
@@ -78,18 +85,6 @@ class InfDataLoader:
         return next(self.iter)
 
 
-def config_logger(is_root, output_dir):
-    # configure logger
-    if is_root:
-        logger.configure(folder=output_dir, format_strings=['stdout', 'log'])
-        if os.environ.get('DEBUG') == '1':
-            logger.set_level(logger.DEBUG)
-        else:
-            logger.set_level(logger.INFO)
-    else:
-        pass
-
-
 def config_summary_writer(is_root, output_dir):
     if is_root:
         log_folder = os.path.join(output_dir, 'logs')
@@ -103,12 +98,10 @@ def config_summary_writer(is_root, output_dir):
     return writer
 
 
-def config_device(rank, no_gpu=False):
-    if no_gpu:
-        device = 'cpu'
-    else:
-        device = torch.device('cuda:{}'.format(rank))
-        torch.cuda.set_device(rank)
+def config_device():
+    rank = dist.get_rank()
+    device = torch.device('cuda:{}'.format(rank))
+    torch.cuda.set_device(rank)
 
     return device
 
@@ -120,11 +113,11 @@ def seed_all(seed):
     np.random.seed(seed)
 
 
-def load_vae(ckpt, device, dset, is_root, freeze_model) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
+def load_vqvae(ckpt, device, is_root, freeze_model) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
     # load checkpoint if ckpt is a path
     if isinstance(ckpt, str):
         if is_root:
-            logger.log(f'Loading VQ-VAE from {ckpt}')
+            print(f'Loading VQ-VAE from {ckpt}')
         ckpt = torch.load(ckpt, map_location=device)
     elif isinstance(ckpt, dict):
         pass
@@ -132,14 +125,11 @@ def load_vae(ckpt, device, dset, is_root, freeze_model) -> Tuple[Any, Dict[str, 
         raise RuntimeError(f'ckpt must be str or dict, but of type {type(ckpt)}')
 
     if is_root:
-        logger.log(f"VQ-VAE checkpoint iteration {ckpt['iteration']} with best loss {ckpt['best_loss']}")
+        print(f"VQ-VAE checkpoint iteration {ckpt['iteration']} with best loss {ckpt['best_loss']}")
 
     model, hp = config_model(
         configs_str='', **ckpt['hp'], cond_types=None) 
     model = model.to(device=device)
-
-    if dset is not None:
-        assert dset.name == ckpt['dset_configs']['dset_name']
     model.load_state_dict(ckpt['state_dict'])
 
     # only perform data-dependent init when training from scratch, broadcast otherwise
@@ -194,11 +184,8 @@ def load_model(
 
 def sample(n_samples, batch, cond_hp, vae, prior, codebook,
            device, temperature, rank, size, gather):
-    # assert n_samples <= size * batch['seq'].shape[0]
-    # n_samples = min(n_samples, batch['seq'].shape[0])  # n_samples cannot exceed batch size?
     # the following might cause uneven chunks, then gathering hangs
-    # n_samples_per = max(min(chunk(total=n_samples, n_chunks=size, rank=rank), batch['seq'].shape[0]), 1)
-    n_samples_per = max(min(ceil(n_samples / size), batch['seq'].shape[0]), 1)
+    n_samples_per = max(min(ceil(n_samples / size), batch['video'].shape[0]), 1)
     if rank == 0 and os.environ.get('VERBOSE') == '1':
         print(f'need local samples {n_samples_per}')
     batch = {k: v[:n_samples_per] for k, v in batch.items()}
@@ -211,12 +198,11 @@ def sample(n_samples, batch, cond_hp, vae, prior, codebook,
     with torch.no_grad():
         cond = []
         if cond_hp['n_cond_frames'] > 0:
-            images = batch['seq'].to(device, non_blocking=True)
+            images = batch['video'].to(device, non_blocking=True)
             cond_frames = images[:, :, :cond_hp['n_cond_frames']]
             cond.append(cond_frames)
-        if cond_hp['include_actions']:
-            actions = batch['actions'].to(device, non_blocking=True)
-            cond.append(actions)
+        if cond_hp['class_cond']:
+            cond.append(batch['label'].to(device, non_blocking=True))
 
         _, encodings = prior.sample(
             n=n_samples_per,

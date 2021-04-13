@@ -1,9 +1,9 @@
 import numpy as np
 import torch
-from videogpt.layers.utils import shift_dim
 import torch.nn as nn
 import torch.nn.functional as F
 
+from videogpt.layers.utils import shift_dim
 from videogpt.layers.utils import tensor_slice
 
 class RightShiftSequence(nn.Module):

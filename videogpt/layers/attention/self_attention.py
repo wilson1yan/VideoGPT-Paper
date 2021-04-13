@@ -5,11 +5,11 @@ import torch.nn as nn
 import torch
 
 from videogpt.utils import deepclone
-from videogpt.layers.norm import DiagNorm
+from videogpt.layers.norm import LayerNorm
 from videogpt.layers.utils import GeLU2, shift_dim, WrapPrePostProcess, checkpoint_layer
 from videogpt.layers.attention.attention import MultiHeadAttention, EncoderAttention
-from videogpt.layers.mask_sequence import RightShiftSequence
-from videogpt.layers.pos_embd import BroadcastAbsolutePositionalEmbeddingND
+from videogpt.layers.right_shift import RightShiftSequence
+from videogpt.layers.pos_embd import BroadcastPosEmbedND
 from videogpt.layers.utils import view_range, shift_dim, tensor_slice, LambdaModule
 import videogpt.logger as logger
 
@@ -39,7 +39,7 @@ class SelfAttentionBlock(nn.Module):
                  checkpoint, attn_type, attn_kwargs):
         super().__init__()
 
-        norm_constr = lambda: DiagNorm(embd_dim=embd_dim, cond_dim=cond_dim)
+        norm_constr = lambda: LayerNorm(embd_dim=embd_dim, cond_dim=cond_dim)
         kwargs = dict(norm_constr=norm_constr, dropout=dropout)
 
         attn = SelfAttentionLayer(
@@ -52,35 +52,15 @@ class SelfAttentionBlock(nn.Module):
         self.attn = WrapPrePostProcess(attn, fn=fn, **kwargs)
 
         if 'enc_attn' in cond_dim:
-            if isinstance(cond_dim['enc_attn'], tuple):
-                cat_res_out_size = cond_dim['enc_attn']  # ((t), h, w, c)
-                enc_len = np.prod(cat_res_out_size[:-1])
-                enc_attn = EncoderAttention(layer_idx=layer_idx,
-                                            shape=shape, dec_len=seq_len, enc_len=enc_len,
-                                            dec_dim=embd_dim, enc_dim=cat_res_out_size[-1],
-                                            proj_dim=proj_dim, n_head=n_head,
-                                            n_layer=n_layer, attn_type='full',
-                                            attn_kwargs=dict(attn_dropout=attn_kwargs['attn_dropout']))
-                enc_attn_wrapper = lambda x, cond, decode_step, decode_idx: enc_attn(x, cond['enc_attn'])
-            else:
-                assert isinstance(cond_dim['enc_attn'], list)
-                enc_attn = nn.ModuleList()
-                for cd in cond_dim['enc_attn']:
-                    enc_len = np.prod(cd[:-1])
-                    enc_attn.append(
-                        EncoderAttention(layer_idx=layer_idx, shape=shape,
-                                         dec_len=seq_len, enc_len=enc_len,
-                                         dec_dim=embd_dim, enc_dim=cd[-1],
-                                         proj_dim=proj_dim, n_head=n_head,
-                                         n_layer=n_layer, attn_type='full',
-                                         attn_kwargs=dict(attn_dropout=attn_kwargs['attn_dropout']))
-                    )
-                def enc_attn_wrapper(x, cond, decode_step, decode_idx):
-                    outs = []
-                    for ec, c in zip(enc_attn, cond['enc_attn']):
-                        out = checkpoint_layer(ec, (x, c), use_checkpoint=checkpoint and self.training)
-                        outs.append(out)
-                    return sum(outs)
+            cat_res_out_size = cond_dim['enc_attn']  # ((t), h, w, c)
+            enc_len = np.prod(cat_res_out_size[:-1])
+            enc_attn = EncoderAttention(layer_idx=layer_idx,
+                                        shape=shape, dec_len=seq_len, enc_len=enc_len,
+                                        dec_dim=embd_dim, enc_dim=cat_res_out_size[-1],
+                                        proj_dim=proj_dim, n_head=n_head,
+                                        n_layer=n_layer, attn_type='full',
+                                        attn_kwargs=dict(attn_dropout=attn_kwargs['attn_dropout']))
+            enc_attn_wrapper = lambda x, cond, decode_step, decode_idx: enc_attn(x, cond['enc_attn'])
             self.enc_attn = WrapPrePostProcess(enc_attn, fn=enc_attn_wrapper, **kwargs)
         else:
             self.enc_attn = None
@@ -109,43 +89,23 @@ class SelfAttentionBlock(nn.Module):
 
 
 class SelfAttentionModel(nn.Module):
-    # channel last
-    def __init__(
-            self, *,
-            shape,
-            n_vocab,
-            embd_dim, proj_dim, cond_dim,
-            n_head, n_layer, causal, ff_mult,
-            cond_types,
-            dropout,
-            checkpoint,
-            attn_type,
-            attn_kwargs,
-    ):
+    def __init__(self, *, shape, n_vocab, embd_dim, proj_dim, cond_dim,
+                 n_head, n_layer, causal, ff_mult, cond_types, dropout,
+                 checkpoint, attn_type, attn_kwargs):
         super().__init__()
         self.shape = shape
         self.embd_dim = embd_dim
         self.cond_dim = cond_dim
-        self.agg_cond = any([c.agg_cond for c in cond_types if c.type == 'enc_attn'])
 
         self.pre_pos_embd = RightShiftSequence(embd_dim)
-        pos_embd = BroadcastAbsolutePositionalEmbeddingND(
+        pos_embd = BroadcastPosEmbedND(
             shape=shape, embd_dim=embd_dim
         )
         self.pos_embd = pos_embd
         if 'enc_attn' in cond_dim:
-            if self.agg_cond:
-                cond_pos_embd = BroadcastAbsolutePositionalEmbeddingND(
-                    shape=cond_dim['enc_attn'][:-1], embd_dim=cond_dim['enc_attn'][-1])
-                self.cond_pos_embd = cond_pos_embd
-            else:
-                cond_pos_embds = []
-                for c in cond_dim['enc_attn']:
-                    cond_pos_embd = BroadcastAbsolutePositionalEmbeddingND(
-                        shape=c[:-1], embd_dim=c[-1]
-                    )
-                    cond_pos_embds.append(cond_pos_embd)
-                self.cond_pos_embds = nn.ModuleList(cond_pos_embds)
+            cond_pos_embd = BroadcastPosEmbedND(
+                shape=cond_dim['enc_attn'][:-1], embd_dim=cond_dim['enc_attn'][-1])
+            self.cond_pos_embd = cond_pos_embd
 
         self.attn_nets = nn.ModuleList(
             [
@@ -192,13 +152,8 @@ class SelfAttentionModel(nn.Module):
                 # just a hack to fix the sampling issue and cond
                 # doesn't point to the cond object in gpt.py
                 cond = deepclone(cond)
-            if self.agg_cond:
-                c = cond['enc_attn']
-                # better to use lambda module but it breaks old snapshots
-                cond['enc_attn'] = c + self.cond_pos_embd(c).type_as(c)
-            else:
-                cond['enc_attn'] = [c + pos_embd(c).type_as(c)
-                                    for c, pos_embd in zip(cond['enc_attn'], self.cond_pos_embds)]
+            c = cond['enc_attn']
+            cond['enc_attn'] = c + self.cond_pos_embd(c).type_as(c)
 
         for i, net in enumerate(self.attn_nets):
             x = net(x, cond, decode_step, decode_idx)

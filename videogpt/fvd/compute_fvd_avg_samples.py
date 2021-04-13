@@ -32,7 +32,7 @@ def main_worker(rank, size, args_in):
 
     seed = args.seed + rank
     seed_all(seed)
-    device = config_device(rank=rank)
+    device = config_device()
 
     prior_ckpt = torch.load(args.prior_ckpt, map_location=device)
     #################### Load VQ-VAE ########################################
@@ -42,7 +42,7 @@ def main_worker(rank, size, args_in):
 
     _, test_loader, dset, _ = get_distributed_loaders(
         dset_configs=dset_configs,
-        batch_size=FVD_SAMPLE_SIZE, size=size, rank=rank, seed=seed,
+        batch_size=FVD_SAMPLE_SIZE, seed=seed,
     )
 
     vqvae, vq_hp = load_model(
@@ -125,7 +125,7 @@ def eval_fvd(sample_fn, i3d, vqvae, loader, device, rank, size, is_root):
     fake_embeddings = get_fvd_logits(fake, i3d=i3d, device=device)
 
     # real, fake (b, c, t, h, w)
-    real = batch['seq'].to(device)
+    real = batch['video'].to(device)
     with torch.no_grad():
         real_recon = vqvae.get_reconstruction(x=real)
         real_recon = (real_recon + 0.5).clamp(0, 1) # [-0.5, 0.5] -> [0, 1]

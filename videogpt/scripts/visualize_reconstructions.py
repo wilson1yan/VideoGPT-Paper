@@ -20,6 +20,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('-c', '--vqvae_ckpt', type=str, required=True)
 parser.add_argument('-d', '--dataset', type=str, required=True)
 parser.add_argument('-r', '--resolution', type=int, default=64)
+parser.add_argument('-f', '--n_frames', type=int, default=16)
 parser.add_argument('-o', '--output_dir', type=str, required=True)
 parser.add_argument('-n', '--n_examples', type=int, default=256)
 parser.add_argument('-s', '--seed', type=int, default=0)
@@ -28,14 +29,13 @@ args = parser.parse_args()
 seed = args.seed
 seed_all(seed)
 
-dset_configs = dict(include_actions=False, crop_mode='center', extra_scale=1.,
-                    resolution=args.resolution)
+dset_configs = dict(resolution=args.resolution, n_frames=args.n_frames)
 _, test_dset, _ = get_config(args.dataset, **dset_configs)
 test_loader = data.DataLoader(test_dset, batch_size=args.n_examples, shuffle=True)
 
-device = config_device(rank=0)
+device = config_device()
 batch = next(iter(test_loader))
-images = batch['seq'][:args.n_examples].to(device)
+images = batch['video'][:args.n_examples].to(device)
 
 vae, _ = load_model(
     ckpt=torch.load(get_ckpt(args.vqvae_ckpt), map_location=device), device=device,

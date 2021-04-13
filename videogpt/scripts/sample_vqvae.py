@@ -19,12 +19,10 @@ from torchvision.utils import save_image
 
 from videogpt.dist_ops import allgather, DistributedDataParallel
 from videogpt.train_utils import seed_all, get_distributed_loaders, config_device, \
-    config_logger, load_model, get_ckpt, sample
+    load_model, get_ckpt, sample
 from videogpt.config_model import config_model
 from videogpt.config_cond import config_cond_types
 from videogpt.layers.utils import shift_dim
-import videogpt.logger as logger
-from videogpt.common import LatentShapeIndices
 
 # In the case the script is being used to generate samples
 # to calculate FVD, there's no need to save so many videos
@@ -47,10 +45,9 @@ def main_worker(rank, size, args_in):
 
     assert args.n_samples % size == 0, f'n_samples {args.n_samples} not divisible by size {size}'
 
-    config_logger(is_root, output_dir=args.output_dir)
     seed = args.seed + rank
     seed_all(seed)
-    device = config_device(rank=rank)
+    device = config_device()
 
     prior_ckpt = torch.load(get_ckpt(args.prior_ckpt), map_location=device)
     vae_ckpt = torch.load(get_ckpt(prior_ckpt['vae_ckpt']), map_location=device)
@@ -62,7 +59,7 @@ def main_worker(rank, size, args_in):
     train_loader, test_loader, dset, _ = get_distributed_loaders(
         dset_configs=dset_configs,
         batch_size=args.n_samples,
-        size=size, rank=rank, seed=seed
+        seed=seed
     )
 
     if args.split == 'train':
@@ -89,21 +86,18 @@ def main_worker(rank, size, args_in):
         return prior, hp, codebook
 
 
-    latent_shapes = vqvae.latent_shapes
-    quantized_sizes = vqvae.quantized_sizes
+    latent_shape = vqvae.latent_shape
+    quantized_shape = vqvae.quantized_shape
 
     if is_root:
-        logger.info('latent shapes', latent_shapes)
-        logger.info('quantized sizes', quantized_sizes)
-        logger.info('total latents', sum([np.prod(latent_shape) for latent_shape in latent_shapes]))
-
+        print('latent shapes', latent_shape)
+        print('quantized shape', quantized_shape)
+        print('total latents', np.prod(latent_shape))
 
     prior, prior_hp, codebook = load_layer_prior(prior_ckpt)
     if is_root:
-        logger.info(f"Loaded vqvae at iteration {vae_ckpt['iteration']}, loss = {vae_ckpt['best_loss']}")
-        logger.pretty_info(vq_hp)
-        logger.info(f"Loaded GPT at iteration {prior_ckpt['iteration']}, loss {prior_ckpt['best_loss']}")
-        logger.pretty_info(prior_hp)
+        print(f"Loaded vqvae at iteration {vae_ckpt['iteration']}, loss = {vae_ckpt['best_loss']}")
+        print(f"Loaded GPT at iteration {prior_ckpt['iteration']}, loss {prior_ckpt['best_loss']}")
 
     """ Generate samples """
     sample_fn = functools.partial(

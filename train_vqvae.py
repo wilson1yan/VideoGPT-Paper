@@ -20,11 +20,10 @@ from torchvision.utils import make_grid
 
 from videogpt.utils import ProgressMeter, AverageMeter
 from videogpt.train_utils import get_distributed_loaders, seed_all, get_ckpt, \
-    get_output_dir, config_logger, save_checkpoint, InfDataLoader, load_model, \
+    get_output_dir, save_checkpoint, InfDataLoader, load_model, \
     config_summary_writer, config_device
 from videogpt.dist_ops import allreduce_avg, allgather, DistributedDataParallel
 from videogpt.config_model import config_model
-import videogpt.logger as logger
 
 
 def main():
@@ -43,22 +42,21 @@ def main_worker(rank, size, args_in):
     dist.init_process_group(backend='nccl', init_method=f'tcp://localhost:{args.port}',
                             world_size=size, rank=rank)
 
-    """ Config loggers, writer, seed and device """
-    config_logger(is_root, output_dir=args.output_dir)
+    """ Config writer, seed and device """
     writer = config_summary_writer(is_root=is_root, output_dir=args.output_dir)
     seed = args.seed + rank
     seed_all(seed)
-    device = config_device(rank=rank)
+    device = config_device()
 
     if is_root:
-        logger.info(f"rank {rank} / size {size}, device {torch.cuda.current_device()}, seed {seed}")
+        print(f"rank {rank} / size {size}, device {torch.cuda.current_device()}, seed {seed}")
 
     torch.backends.cudnn.benchmark = True
 
     if args.ckpt is not None:
         ckpt = torch.load(args.ckpt, map_location=device)
         if is_root:
-            logger.info(f"Loading VQ-VAE from {args.ckpt}, iteration {ckpt['iteration']}, best_loss {ckpt['best_loss']}")
+            print(f"Loading VQ-VAE from {args.ckpt}, iteration {ckpt['iteration']}, best_loss {ckpt['best_loss']}")
     else:
         ckpt = None
 
@@ -70,18 +68,16 @@ def main_worker(rank, size, args_in):
         args.dataset = dset_configs['dset_name']
         args.resolution = dset_configs['resolution']
     else:
-        dset_configs = dict(include_actions=False, crop_mode='center',
-                            dset_name=args.dataset,
-                            resolution=args.resolution, extra_scale=1.)
+        dset_configs = dict(dset_name=args.dataset,
+                            resolution=args.resolution,
+                            n_frames=args.n_frames)
 
     train_loader, test_loader, dset, _ = get_distributed_loaders(
-        dset_configs=dset_configs,
-        batch_size=args.batch_size, size=size, rank=rank, seed=seed,
+        dset_configs=dset_configs, batch_size=args.batch_size, seed=seed
     )
 
     if is_root:
-        logger.pretty_info(vars(args), dset_configs)
-        logger.info(
+        print(
             f"dset loader n_batch: train = {len(train_loader)}, test = {len(test_loader)}")
 
     """ Build networks """
@@ -110,21 +106,21 @@ def main_worker(rank, size, args_in):
     )
 
     if is_root:
-        logger.pretty_info(hp)
-
         total_parameters = sum([np.prod(p.shape) for p in model.parameters() if p.requires_grad])
-        logger.info('Total Parameters {}'.format(total_parameters))
+        print('Total Parameters {}'.format(total_parameters))
 
     def inputs_fn(batch):
-        x = batch['seq']
+        x = batch['video']
         x = x.to(device, non_blocking=True)
 
         return dict(x=x) 
 
     if is_root:
-        total_latents = sum(np.prod(latent_shape) for latent_shape in model.latent_shapes)
-        logger.info('total latents', total_latents)
-        logger.info('input shape', model.input_shape, 'latent shapes', model.latent_shapes, 'feature size', model.feature_size, 'not flattened quantized sizes', model.quantized_sizes)
+        total_latents = np.prod(model.latent_shape)
+        print('total latents', total_latents)
+        print('input shape', model.input_shape, 
+              'latent shape', model.latent_shape, 
+              'not flattened quantized shape', model.quantized_shape)
 
     # build optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
@@ -135,7 +131,7 @@ def main_worker(rank, size, args_in):
         iteration_start = ckpt['iteration'] + 1
         best_loss = ckpt['best_loss']
         if is_root:
-            logger.info(f"Loaded VQ-VAE ckpt at Iteration {ckpt['iteration']}, loss {best_loss}")
+            print(f"Loaded VQ-VAE ckpt at Iteration {ckpt['iteration']}, loss {best_loss}")
     else:
         best_loss = float('inf')
         epoch_start = 0
@@ -162,7 +158,7 @@ def main_worker(rank, size, args_in):
     }
 
     """ Training loop """
-    logger.info('start training loop', rank, '/', size)
+    print('start training loop', rank, '/', size)
 
     iteration = iteration_start
     while iteration <= args.total_iters:
@@ -222,7 +218,7 @@ def train(*, train_loader, model, optimizer, iteration,
             writer.add_scalar('lr', optimizer.param_groups[0]['lr'], iteration)
         data_time.update(time.time() - end)
 
-        bs = batch['seq'].shape[0]
+        bs = batch['video'].shape[0]
         output_dict = model(**inputs_fn(batch))
 
         for k in model.metrics:
@@ -265,7 +261,7 @@ def validate(*, test_loader, model, iteration, writer, is_root, device, size, in
     with torch.no_grad():
         end = time.time()
         for i, batch in enumerate(test_loader):
-            bs = batch['seq'].shape[0]
+            bs = batch['video'].shape[0]
             output_dict = model(**inputs_fn(batch))  # no aug for val?
 
             for k in model.metrics:

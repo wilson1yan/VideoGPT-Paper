@@ -4,7 +4,7 @@ import numpy as np
 
 from videogpt.layers.utils import shift_dim
 
-class LayerNorm(nn.Module):
+class ChannelLayerNorm(nn.Module):
     # layer norm on channels
     def __init__(self, in_features):
         super().__init__()
@@ -16,10 +16,9 @@ class LayerNorm(nn.Module):
         x = shift_dim(x, -1, 1)
         return x
 
-class DiagNorm(nn.Module):
+class LayerNorm(nn.Module):
     def __init__(self, embd_dim, cond_dim):
         super().__init__()
-        # self.conditional = cond_type is not None and 'affine_norm' in cond_type
         self.conditional = 'affine_norm' in cond_dim
 
         if self.conditional:
@@ -27,7 +26,6 @@ class DiagNorm(nn.Module):
             self.w = nn.Linear(vec_dim, embd_dim, bias=False)
             nn.init.constant_(self.w.weight.data, 1. / np.sqrt(vec_dim))
             self.wb = nn.Linear(vec_dim, embd_dim, bias=False)
-            # FIXME: wb zero init?
         else:
             self.g = nn.Parameter(torch.ones(embd_dim, dtype=torch.float32), requires_grad=True)
             self.b = nn.Parameter(torch.zeros(embd_dim, dtype=torch.float32), requires_grad=True)

@@ -20,11 +20,9 @@ from videogpt.config_model import config_model
 from videogpt.config_cond import config_cond_types
 from videogpt.layers.utils import shift_dim
 from videogpt.train_utils import get_distributed_loaders, seed_all, get_output_dir, \
-    get_ckpt, config_logger, save_checkpoint, InfDataLoader, load_model, \
+    get_ckpt, save_checkpoint, InfDataLoader, load_model, \
     config_summary_writer, config_device, sample
 from videogpt.dist_ops import DistributedDataParallel, allreduce_avg_list, allgather
-import videogpt.logger as logger
-import resource
 
 
 def main():
@@ -42,16 +40,12 @@ def main_worker(rank, size, args_in):
     dist.init_process_group(backend='nccl', init_method=f"tcp://localhost:{args.port}",
                             world_size=size, rank=rank)
 
-    """ Config loggers, writer, seed and device """
+    """ Config writer, seed and device """
 
-    config_logger(is_root, output_dir=args.output_dir)
     writer = config_summary_writer(is_root=is_root, output_dir=args.output_dir)
     seed = args.seed + rank
     seed_all(seed)
-    device = config_device(rank=rank)
-
-    if is_root:
-        logger.info(f"rank {rank} / size {size}, device {torch.cuda.current_device()}, seed {seed}")
+    device = config_device()
 
     torch.backends.cudnn.benchmark = True
 
@@ -61,33 +55,27 @@ def main_worker(rank, size, args_in):
         gpt_ckpt = torch.load(args.ckpt, map_location=device)
 
         if is_root:
-            logger.info(f"Loading GPT from checkpoint {args.ckpt} with loss {gpt_ckpt['best_loss']}")
+            print(f"Loading GPT from checkpoint {args.ckpt} with loss {gpt_ckpt['best_loss']}")
         dset_configs = gpt_ckpt['dset_configs']
 
         # overwrite
-        args.include_actions = dset_configs['include_actions']
         args.dataset = dset_configs['dset_name']
         args.resolution = dset_configs['resolution']
     else:
         gpt_ckpt = None
-        dset_configs = dict(include_actions=args.include_actions,
-                            dset_name=args.dataset, resolution=args.resolution,
-                            crop_mode='center', extra_scale=1.)
+        dset_configs = dict(dset_name=args.dataset, resolution=args.resolution,
+                            n_frames=args.n_frames)
 
     train_loader, test_loader, dset, ds_info = get_distributed_loaders(
-        dset_configs=dset_configs, batch_size=args.batch_size, size=size, rank=rank, 
-        seed=seed
+        dset_configs=dset_configs, batch_size=args.batch_size, seed=seed
     )
     if is_root:
-        logger.pretty_info(vars(args), dset_configs)
-        logger.info(
-            dset,
-            f"dset loader n_batch: train = {len(train_loader)}, test = {len(test_loader)}")
+        print(f"dset loader n_batch: train = {len(train_loader)}, test = {len(test_loader)}")
 
     """ Load VQ-VAE """
     vae_ckpt = args.vae_ckpt if gpt_ckpt is None else gpt_ckpt['vae_ckpt']
     if is_root:
-        logger.log(f'Loading VQ-VAE from {vae_ckpt}')
+        print(f'Loading VQ-VAE from {vae_ckpt}')
 
     vae_ckpt_loaded = torch.load(vae_ckpt, map_location=device)
     vqvae, vq_hp = load_model(
@@ -96,12 +84,12 @@ def main_worker(rank, size, args_in):
     )
     del vae_ckpt_loaded
 
-    latent_shapes = vqvae.latent_shapes
-    quantized_sizes = vqvae.quantized_sizes
+    latent_shape = vqvae.latent_shape
+    quantized_shape = vqvae.quantized_shape
     if is_root:
-        logger.info('latent shapes', latent_shapes)
-        logger.info('quantized sizes', quantized_sizes)
-        logger.info('total latents', sum([np.prod(latent_shape) for latent_shape in latent_shapes]))
+        print('latent shape', latent_shape)
+        print('quantized shape', quantized_shape)
+        print('total latents', np.prod(latent_shape))
 
     """ Config cond_types"""
 
@@ -110,7 +98,7 @@ def main_worker(rank, size, args_in):
     else:
         cond_hp = dict(
             n_cond_frames=args.n_cond_frames,
-            include_actions=args.include_actions,
+            class_cond=args.class_cond,
             cond_init_configs=dict(
                 type=args.cond_init_type,
                 model=args.cond_init_model,
@@ -119,13 +107,12 @@ def main_worker(rank, size, args_in):
                 resnet_output_shape=(1, 16, 16),
                 width_multiplier=1,
             ),
-           agg_cond=args.agg_cond,
         )
 
     def load_prior(layer_ckpt):
         """ Check consistency """
         layer_cond_types, _ = config_cond_types(
-            cond_hp=layer_ckpt['cond_hp'], dset=dset, device=device)
+            cond_hp=layer_ckpt['cond_hp'], dset=dset)
         # freeze all previous priors, not the current one
         layer_prior, layer_hp = load_model(
             ckpt=layer_ckpt, device=device, freeze_model=False,
@@ -135,14 +122,14 @@ def main_worker(rank, size, args_in):
 
     def inputs_fn(batch):
         with torch.no_grad():
-            videos = batch['seq'].to(device, non_blocking=True)  # (b, c, t, h, w)
+            videos = batch['video'].to(device, non_blocking=True)  # (b, c, t, h, w)
 
             cond = []
             if cond_hp['n_cond_frames'] > 0:
                 cond_frames = videos[:, :, :cond_hp['n_cond_frames']]
                 cond.append(cond_frames)
-            if cond_hp['include_actions']:
-                cond.append(batch['actions'].to(device, non_blocking=True))
+            if cond_hp['class_cond']:
+                cond.append(batch['label'].to(device, non_blocking=True))
 
             quantized, encodings = vqvae.encode(x=videos, no_flatten=True)
 
@@ -155,12 +142,11 @@ def main_worker(rank, size, args_in):
                         decode_step=None, decode_idx=None)
 
     cond_types, cond_hp = config_cond_types(
-        cond_hp=cond_hp, dset=dset, device=device
+        cond_hp=cond_hp, dset=dset
     )
 
     if is_root:
-        logger.pretty_info(cond_hp)
-        logger.info('cond_types', [(c.name, c.type, c.out_size, c.agg_cond) for c in cond_types])
+        print('cond_types', [(c.name, c.type, c.out_size) for c in cond_types])
 
     """ Load GPT snapshot, if any """
     if gpt_ckpt is not None:
@@ -168,7 +154,7 @@ def main_worker(rank, size, args_in):
 
         best_loss = gpt_ckpt['best_loss']
 
-        optimizer = optim.Adam(prior.parameters(), lr=args.max_lr, betas=(0.9, 0.999))
+        optimizer = optim.Adam(prior.parameters(), lr=args.lr)
         optimizer.load_state_dict(gpt_ckpt['optimizer'])
         scheduler = lr_scheduler.CosineAnnealingLR(optimizer, args.total_iters)
         scheduler.load_state_dict(gpt_ckpt['scheduler'])
@@ -183,7 +169,7 @@ def main_worker(rank, size, args_in):
         # TODO: use (self_gen_n_embd*num_self_gen_in_use,) i.e. concat, or use below i.e. sum up y_gen?
         prior, hp = config_model(
             configs_str=args.cfg,
-            shape=latent_shapes[0],
+            shape=latent_shape,
             in_features=vq_hp['embedding_dim'],
             n_vocab=vq_hp['codes_per_book'],
             cond_types=cond_types,
@@ -191,7 +177,7 @@ def main_worker(rank, size, args_in):
         prior = prior.to(device)
         codebook = vqvae.codebook
 
-        optimizer = optim.Adam(prior.parameters(), lr=args.max_lr, betas=(0.9, 0.999))
+        optimizer = optim.Adam(prior.parameters(), lr=args.lr)
         scheduler = lr_scheduler.CosineAnnealingLR(optimizer, args.total_iters)
         scaler = GradScaler()
         best_loss = float('inf')
@@ -204,14 +190,12 @@ def main_worker(rank, size, args_in):
 
     if is_root:
         for cond_net in prior.cond_nets:
-            logger.info('cond_net size with grad', sum(p.numel() for p in cond_net.parameters() if p.requires_grad))
-            logger.info('cond_net size', sum(p.numel() for p in cond_net.parameters()))
+            print('cond_net size with grad', sum(p.numel() for p in cond_net.parameters() if p.requires_grad))
+            print('cond_net size', sum(p.numel() for p in cond_net.parameters()))
 
     if is_root:
-        logger.pretty_info(hp)
-
         if args.amp:
-            logger.info('Training with AMP')
+            print('Training with AMP')
 
     # to be saved to model checkpoints
     default_ckpt_dict = {
@@ -226,7 +210,7 @@ def main_worker(rank, size, args_in):
 
     if is_root:
         total_parameters = sum([np.prod(p.shape) for p in prior.parameters() if p.requires_grad])
-        logger.info('model size: prior params count with grads = {}'.format(total_parameters))
+        print('model size: prior params count with grads = {}'.format(total_parameters))
 
     train_loader = InfDataLoader(train_loader, epoch_start)
 
@@ -283,7 +267,7 @@ def main_worker(rank, size, args_in):
     time_start = time.time()
 
     while iteration <= args.total_iters:
-        train_loss, iteration = train_for(iteration=iteration, log_compute=(iteration==iteration_start))  # average gen_loss
+        train_loss, iteration = train_for(iteration=iteration)  # average gen_loss
 
         if iteration % args.test_every == 0:
             test_loss = validate_for(iteration=iteration)
@@ -311,8 +295,8 @@ def main_worker(rank, size, args_in):
         iteration += 1
 
     if is_root:
-        logger.info(f'Final iteration: {iteration}, best loss: {best_loss}')
-        logger.info(f'Logs saved under {args.output_dir}')
+        print(f'Final iteration: {iteration}, best loss: {best_loss}')
+        print(f'Logs saved under {args.output_dir}')
         writer.close()
 
 
@@ -325,7 +309,7 @@ def need_to_return(iteration):
 
 
 def train(train_loader, inputs_fn, prior, optimizer, scheduler, scaler,
-          iteration, writer, is_root, size, device, log_compute=False):
+          iteration, writer, is_root, size, device):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     avg_loss = AverageMeter('Loss', ':6.3f')
@@ -345,7 +329,7 @@ def train(train_loader, inputs_fn, prior, optimizer, scheduler, scaler,
             writer.add_scalar('lr', optimizer.param_groups[0]['lr'], iteration * args.batch_size)
         data_time.update(time.time() - end)
 
-        bs = batch['seq'].shape[0]
+        bs = batch['video'].shape[0]
         inp = inputs_fn(batch)
         with autocast(enabled=args.amp):
             return_dict = prior(**inp)
@@ -384,27 +368,6 @@ def train(train_loader, inputs_fn, prior, optimizer, scheduler, scaler,
             progress.display(iteration)
 
         if need_to_return(iteration):
-
-            if is_root and log_compute:
-                # only need to log once
-                logger.info(
-                    'gpu*seconds per training iteration per (global) batch size',
-                    size * batch_time.avg / args.batch_size,
-                    )
-
-                # not sure what's the right way to log mem usage
-                max_mem = torch.cuda.max_memory_allocated(device)
-                logger.info(f'torch max mem: {max_mem}')
-                max_mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                logger.info(f"max mem usage: {max_mem} KB")  # KB on linux, bytes on macos
-
-                total_parameters = sum([np.prod(p.shape) for p in prior.parameters() if p.requires_grad])
-                logger.info('model size: prior params count with grads = {}'.format(total_parameters))
-
-                logger.info('batch size per gpu', args.batch_size / size)
-                logger.info('max mem usage per data point', size * max_mem / args.batch_size)
-                # = gpu hours per data point (for one itr) = time_per_iter / local_batch_size = n_gpus * time_per_iter / global_batch_size
-
             return avg_loss.avg, iteration
 
         iteration += 1
@@ -427,7 +390,7 @@ def validate(test_loader, inputs_fn, prior, iteration, writer,
     with torch.no_grad():
         end = time.time()
         for i, batch in enumerate(test_loader):
-            bs = batch['seq'].shape[0]
+            bs = batch['video'].shape[0]
             inp = inputs_fn(batch)  # no aug for eval for now, can add separate metrics
             return_dict = prior(**inp) # evaluate with full precision
             loss = return_dict['loss']
@@ -486,7 +449,7 @@ if __name__ == "__main__":
     parser.add_argument('-c', '--ckpt', type=str, required=False, 
                         help='path to GPT checkpoint')
     parser.add_argument('--cfg', type=str, help='ignored when ckpt is provided')
-    parser.add_argument('--vae_ckpt', type=str, required=False, help='path to VAE checkpoint, ignored when ckpt provided', default=None)
+    parser.add_argument('--vqvae_ckpt', type=str, required=False, help='path to VAE checkpoint, ignored when ckpt provided', default=None)
     parser.add_argument('--temperature', type=float, default=1.0, help='temperature when sampling')
 
     # Dataset parameters
@@ -494,21 +457,18 @@ if __name__ == "__main__":
     parser.add_argument('-r', '--resolution', type=int, default=64, help='default: 64')
     parser.add_argument('--n_cond_frames', type=int, default=0,
                         help='number of frames to condition on')
-    parser.add_argument('--include_actions', action='store_true', help='condition on actions')
+    parser.add_argument('--class_cond', action='store_true', help='condition on actions')
 
     # Conditional model parameters
     parser.add_argument('--cond_init_model', type=str, default='resnet_v1',
                         help='model for conditional initial frames, ' + \
-                             'resnet_v1|vae')
+                             'resnet_v1')
     parser.add_argument('--cond_init_type', type=str, default='enc_attn',
                         help='enc_attn')
-    parser.add_argument('--agg_cond', action='store_true',
-                        help='for enc_attn, concat conds together if agg_cond = True.' + \
-                             'Otherwise have separate EncoderAttention per cond')
 
     # Training parameters
     parser.add_argument('-b', '--batch_size', type=int, default=32, help='batch size total for all gpus (default: 128)')
-    parser.add_argument('--max_lr', type=float, default=3e-4, help='default: 1e-3')
+    parser.add_argument('--lr', type=float, default=3e-4, help='default: 1e-3')
     parser.add_argument('-e', '--total_iters', type=int, default=200000,
                         help='default: 200000')
     parser.add_argument('--amp', action='store_true', help='Use AMP training')
@@ -518,7 +478,6 @@ if __name__ == "__main__":
     parser.add_argument('--generate_every', type=int, default=10000, help='default: 10000')
     parser.add_argument('-i', '--log_interval', type=int, default=50, help='default: 50')
 
-    # parser.add_argument('--no_gpu', action='store_true', help='disable gpu for debugging')
     parser.add_argument('-p', '--port', type=int, default=23455,
                         help='tcp port for distributed training (default: 23455)')
 

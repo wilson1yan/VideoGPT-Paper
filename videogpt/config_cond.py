@@ -1,29 +1,20 @@
+from collections import namedtuple
 from typing import Tuple, Dict, Any, Optional, Union
 
 import torch
 import torch.nn as nn
 
-from videogpt.common import CondType, D_SHAPE_THWL
-from videogpt.layers.utils import shift_dim, identity
-from videogpt.train_utils import load_model, get_ckpt
-import videogpt.logger as logger
+from videogpt.layers.utils import identity
 from videogpt.models.resnet import resnet_v1
-from videogpt.layers.utils import shift_dim, LambdaModule
-from videogpt.datasets.abstract_dataset import AbstractDataset
 
-cond_model_resgistry = {
-    'prior_resnet_v1': dict(
-        model_cls='resnet_v1',
-        # TODO
-    )
-}
+CondType = namedtuple(
+    'CondType',
+    ('name', 'type', 'out_size', 'preprocess_op', 'net'),
+)
 
 
 def config_cond_types(
-        *,
-        cond_hp: Union[Dict[str, Any], None],
-        dset: AbstractDataset,
-        device,
+        *, cond_hp: Union[Dict[str, Any], None], dset,
 ) -> Tuple[Tuple[CondType, ...], Dict[str, Any]]:
     # inputs are first pre-processed by preprocess_op,
     # then cond-nets take in channel-first image / features, output channel-last, N-D features,
@@ -31,7 +22,6 @@ def config_cond_types(
     # output features will be flattened and fed into attention network
     # when enc_attn is True
 
-    # Make compatible with old checkpoints
     cond_types = []
 
     """ Conditioning on initial frames """
@@ -39,7 +29,7 @@ def config_cond_types(
     if cond_hp['n_cond_frames'] > 0:
         cond_init_configs = cond_hp['cond_init_configs']
         cond_net_input_size = (  # channel first
-            dset.n_channels, cond_hp['n_cond_frames'], *dset.input_shape[1:])  # (3, n_cond_frame, h, w)
+            3, cond_hp['n_cond_frames'], *dset.input_shape[1:])  # (3, n_cond_frame, h, w)
         if cond_init_configs['model'] == 'resnet_v1':  # model for initial frames
             assert len(cond_net_input_size[1:]) == len(cond_init_configs['resnet_output_shape']) == 3
             preprocess_op = identity
@@ -49,7 +39,7 @@ def config_cond_types(
                 resnet_dim=cond_init_configs['resnet_dim'],
                 resnet_depth=cond_init_configs['resnet_depth'],
                 width_multiplier=cond_init_configs['width_multiplier'],
-                cifar_stem=cond_net_input_size[-1] < 128,  # TODO: ?
+                cifar_stem=cond_net_input_size[-1] < 128,
                 norm_type='ln',
                 pool=False,
             )
@@ -65,20 +55,16 @@ def config_cond_types(
                 type=cond_init_configs['type'],
                 out_size=cond_net_output_size,
                 preprocess_op=preprocess_op,
-                net=cond_net,
-                agg_cond=cond_hp['agg_cond'],
+                net=cond_net
             )
         )
 
     """ Conditioning on action sequence or class labels """
 
-    if cond_hp['include_actions']:
-        assert dset.action_dim > 0
-
-        cond_size = (dset.action_dim,)
-        cond_types.append(CondType(name='cond_action', type='affine_norm', out_size=cond_size,
-                                   preprocess_op=identity, model=None, # shouldn't be used
-                                   agg_cond=True))
+    if cond_hp['class_cond']:
+        cond_size = (dset.n_classes,)
+        cond_types.append(CondType(name='cond_class', type='affine_norm', out_size=cond_size,
+                                   preprocess_op=identity, model=None))
 
     cond_types = tuple(cond_types)
 

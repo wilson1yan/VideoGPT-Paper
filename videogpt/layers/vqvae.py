@@ -9,103 +9,54 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from videogpt.layers.utils import SamePadConvNd, LambdaModule, shift_dim, SamePadConvTransposeNd, DebugModule
-from videogpt.layers.attention.attention import EncoderAttention
-from videogpt.layers.utils import Checkpoint
+from videogpt.layers.utils import SamePadConvNd, LambdaModule, shift_dim, SamePadConvTransposeNd
 from videogpt.dist_ops import broadcast, allreduce
-from videogpt.layers.attention.attention import MultiHeadAttention
 
 
 class AttentionResidualBlock(nn.Module):
     def __init__(self, input_shape, num_hiddens, num_residual_hiddens,
-                 attn_n_heads, use_attn, attn_type, attn_kwargs,
-                 pos_embd, checkpoint):
+                 attn_n_heads, use_attn, pos_embd):
         super().__init__()
-
         self.use_attn = use_attn
-
         n_dim = len(input_shape)
 
-        self.block = block = nn.ModuleList()  # register to self for bw compatibiliry
-
-        pre_attn_block = [
+        block = [
             nn.SyncBatchNorm(num_hiddens),
             nn.ReLU(inplace=True),
-            SamePadConvNd(
-                n_dim=n_dim,
-                in_channels=num_hiddens,
-                out_channels=num_residual_hiddens,
-                kernel_size=3,
-                stride=1,
-                bias=False,
-            ),
+            SamePadConvNd(n_dim=n_dim, in_channels=num_hiddens,
+                          out_channels=num_residual_hiddens,
+                          kernel_size=3, stride=1, bias=False),
             nn.SyncBatchNorm(num_residual_hiddens),
             nn.ReLU(inplace=True),
-            SamePadConvNd(
-                n_dim=n_dim,
-                in_channels=num_residual_hiddens,
-                out_channels=num_hiddens,
-                kernel_size=1,
-                stride=1,
-                bias=False,
-            )
+            SamePadConvNd(n_dim=n_dim, in_channels=num_residual_hiddens,
+                          out_channels=num_hiddens, kernel_size=1,
+                          stride=1, bias=False)
         ]
-        self.block.extend(pre_attn_block)
-
         if use_attn:
-            # pos_embd is shared
-            pre_pos_embd = [
+            block.extend([
                 nn.SyncBatchNorm(num_hiddens),
                 nn.ReLU(inplace=True),
                 LambdaModule(functools.partial(shift_dim, src_dim=1, dest_dim=-1)),
-            ]
-            block.extend(pre_pos_embd)
-
-            add_pos_embd = LambdaModule(
-                lambda x: x + pos_embd(x)
-            ) 
-            block.append(add_pos_embd)
-
-            if attn_type == 'axial':
-                attn_block = list()
-                attn_block.append(LambdaModule(functools.partial(shift_dim, src_dim=-1, dest_dim=1)))
-                attn = AxialAttention(dim=num_hiddens, dim_index=1, heads=attn_n_heads,
-                                      num_dimensions=n_dim)
-                attn_block.append(Checkpoint(attn) if checkpoint else attn)
-                block.extend(attn_block)
-            else:
-                len_inp = np.prod(input_shape)
-                self.attn = MultiHeadAttention(layer_idx=1, shape=input_shape, len_q=len_inp,
-                                               len_kv=len_inp, dim_q=num_hiddens, dim_kv=num_hiddens,
-                                               proj_qk_dim=128, proj_v_dim=128, n_head=attn_n_heads,
-                                               n_layer=1, causal=False, attn_type=attn_type,
-                                               attn_kwargs=attn_kwargs)
-                attn = LambdaModule(
-                    lambda h: self.attn(q=h, k=h, v=h, decode_step=None, decode_idx=None)
-                )
-                block.append(Checkpoint(attn) if checkpoint else attn)
-                block.append(LambdaModule(functools.partial(shift_dim, src_dim=-1, dest_dim=1)))
+                LambdaModule(lambda x: x + pos_embd(x)),
+                LambdaModule(functools.partial(shift_dim, src_dim=-1, dest_dim=1)),
+                AxialAttention(dim=num_hiddens, dim_index=1, heads=attn_n_heads,
+                               num_dimensions=n_dim)
+            ])
+        self.block = nn.Sequential(*block)
 
     def forward(self, x):
-        h = x
-        for net in self.block:
-            h = net(h)
-        return x + h
+        return x + self.block(x)
 
 
 class AttentionResidualStack(nn.Module):
     def __init__(self, input_shape, num_hiddens,
                  num_residual_layers, num_residual_hiddens,
-                 attn_n_heads, use_attn, attn_type, attn_kwargs,
-                 pos_embd=None,
-                 checkpoint=False):
-        super(AttentionResidualStack, self).__init__()
+                 attn_n_heads, use_attn, pos_embd=None):
+        super().__init__()
 
         self.blocks = nn.ModuleList([
             AttentionResidualBlock(input_shape, num_hiddens, num_residual_hiddens,
-                                   attn_n_heads, use_attn, attn_type, attn_kwargs,
-                                   pos_embd=pos_embd,
-                                   checkpoint=checkpoint)
+                                   attn_n_heads, use_attn, pos_embd=pos_embd)
             for _ in range(num_residual_layers)
         ])
         self.bn = nn.SyncBatchNorm(num_hiddens)
@@ -113,7 +64,7 @@ class AttentionResidualStack(nn.Module):
     def forward(self, x):
         h = x
         for block in self.blocks:
-            h = block(x=h)
+            h = block(h)
         return F.relu(self.bn(h))
 
 
@@ -185,15 +136,13 @@ class Quantize(nn.Module):
         # (b, t, h, w, n_c, c)
         quantized = torch.stack([F.embedding(encoding_indices[i], self.embeddings[i])
                                  for i in range(self.n_codebooks)], dim=-2)
-        if not no_flatten:
-            quantized = quantized.flatten(start_dim=-2) # (b, t, h, w, n_c*c)
-        else:
-           # assert not self.training
-            # unflatten z
+        if no_flatten:
             z = shift_dim(z, 1, -1)
             z = z.view(*z.shape[:-1], self.n_codebooks, self.embedding_dim)
             z = shift_dim(z, -1, 1)
-        quantized = shift_dim(quantized, -1, 1) # (b, n_c * c, t, h, w)
+        else:
+            quantized = quantized.flatten(start_dim=-2) # (b, t, h, w, n_c*c)
+        quantized = shift_dim(quantized, -1, 1)
         # if no_flatten: (b, c, t, h, w, n_c)
         # else: (b, n_c*c, t, h, w)
 
@@ -233,9 +182,9 @@ class Quantize(nn.Module):
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10), dim=1))
         perplexity = perplexity.mean()
 
-        return dict(quantize=quantized_st, encodings=enc_idxs_return,
-                    loss=loss,
-                    commitment_loss=commitment_loss, perplexity=perplexity)
+        return dict(embeddings=quantized_st, encodings=enc_idxs_return,
+                    commitment_loss=commitment_loss, perplexity=perplexity,
+                    loss=loss)
 
     def dictionary_lookup(self, encodings, no_flatten=False):
         # encodings: (b, t, h, w, n_c)
@@ -250,17 +199,15 @@ class Quantize(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, input_shape, in_channels, num_hiddens,
+    def __init__(self, input_shape, num_hiddens,
                  num_residual_layers, num_residual_hiddens,
-                 attn_n_heads, downsample, use_attn,
-                 attn_type, attn_kwargs, pos_embd,
-                 checkpoint=False):
-        super(Encoder, self).__init__()
+                 attn_n_heads, downsample, use_attn, pos_embd):
+        super().__init__()
         n_dim = len(input_shape)
         self.downsample = downsample
 
         n_times_downsample = np.array([int(math.log2(d)) for d in downsample])
-        in_channels = in_channels
+        in_channels = 3
         self.ds_convs = nn.ModuleList()
         while np.any(n_times_downsample > 0):
             stride = tuple([2 if d > 0 else 1 for d in n_times_downsample])
@@ -288,12 +235,8 @@ class Encoder(nn.Module):
         self.res_stack = AttentionResidualStack(input_shape, num_hiddens,
                                                 num_residual_layers,
                                                 num_residual_hiddens,
-                                                attn_n_heads,
-                                                use_attn,
-                                                attn_type,
-                                                attn_kwargs,
-                                                pos_embd=pos_embd,
-                                                checkpoint=checkpoint)
+                                                attn_n_heads, use_attn,
+                                                pos_embd=pos_embd)
 
     def forward(self, x):
         h = x
@@ -309,10 +252,8 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, input_shape, in_channels, num_hiddens,
                  num_residual_layers, num_residual_hiddens,
-                 num_outputs, attn_n_heads, upsample, use_attn,
-                 attn_type, attn_kwargs, pos_embd,
-                 checkpoint=False):
-        super(Decoder, self).__init__()
+                 attn_n_heads, upsample, use_attn, pos_embd):
+        super().__init__()
         n_dim = len(input_shape)
         self.conv1 = SamePadConvNd(
             n_dim=n_dim,
@@ -325,18 +266,14 @@ class Decoder(nn.Module):
         self.res_stack = AttentionResidualStack(input_shape, num_hiddens,
                                                 num_residual_layers,
                                                 num_residual_hiddens,
-                                                attn_n_heads,
-                                                use_attn,
-                                                attn_type,
-                                                attn_kwargs,
-                                                pos_embd=pos_embd,
-                                                checkpoint=checkpoint)
+                                                attn_n_heads,use_attn,
+                                                pos_embd=pos_embd)
 
         n_times_upsample = np.array([int(math.log2(d)) for d in upsample])
         max_us = n_times_upsample.max()
         self.us_convts = nn.ModuleList()
         for i in range(max_us):
-            out_channels = num_outputs if i == max_us - 1 else num_hiddens
+            out_channels = 3 if i == max_us - 1 else num_hiddens
 
             convt = SamePadConvTransposeNd(
                 n_dim=n_dim,

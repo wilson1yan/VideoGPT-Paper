@@ -216,25 +216,13 @@ class SamePadConvTransposeNd(nn.Module):
 
 
 class LambdaModule(nn.Module):
-    def __init__(self, fn, net=None):
+    def __init__(self, fn):
         super().__init__()
         self.fn = fn
-        self.net = net  # register nn.Module assuming fn uses weights from net
-        # FIXME: better register net in parent nn.Module rather than here to prevent unintended dynamic variable assignment
 
     def forward(self, *args, **kwargs):
         return self.fn(*args, **kwargs)
 
-
-class DebugModule(nn.Module):
-    def __init__(self, msg):
-        super().__init__()
-        # assert os.environ.get('DEBUG') == '1'
-        self.msg = msg
-
-    def forward(self, x):
-        logger.debug(self.msg, x.shape)
-        return x
 
 class GeLU2(nn.Module):
     def forward(self, x):

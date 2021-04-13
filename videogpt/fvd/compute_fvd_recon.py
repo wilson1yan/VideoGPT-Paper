@@ -15,7 +15,7 @@ def main():
     assert torch.cuda.is_available()
     seed = args.seed
     seed_all(seed)
-    device = config_device(rank=0)
+    device = config_device()
 
     ckpt = torch.load(args.ckpt, map_location=device)
     print(f"Loading VQ-VAE from {args.ckpt}, iteration {ckpt['iteration']}, best_loss {ckpt['best_loss']}")
@@ -25,7 +25,7 @@ def main():
     # Each process has full dataloader
     train_loader, test_loader, dset, _ = get_distributed_loaders(
         dset_configs=dset_configs,
-        batch_size=FVD_SAMPLE_SIZE, size=1, rank=0, seed=seed
+        batch_size=FVD_SAMPLE_SIZE, seed=seed
     )
 
     vqvae, _ = load_model(
@@ -41,7 +41,7 @@ def main():
 
 
 def eval_fvd(i3d, vqvae, loader, device):
-    real = next(iter(loader))['seq'].to(device)
+    real = next(iter(loader))['video'].to(device)
     with torch.no_grad():
         fake = []
         b = 32

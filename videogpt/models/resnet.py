@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.cuda.amp import custom_fwd
 
-from videogpt.layers.norm import LayerNorm
+from videogpt.layers.norm import ChannelLayerNorm
 from videogpt.layers.utils import SamePadConvNd, shift_dim
 
 
@@ -19,7 +19,7 @@ class NormReLU(nn.Module):
         if norm_type == 'bn':
             self.norm = nn.SyncBatchNorm(channels)
         elif norm_type == 'ln':
-            self.norm = LayerNorm(channels)
+            self.norm = ChannelLayerNorm(channels)
         else:
             self.bn = nn.Identity()
 

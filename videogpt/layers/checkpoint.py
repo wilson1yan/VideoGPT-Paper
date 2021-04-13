@@ -3,6 +3,9 @@ import warnings
 from typing import Any, Iterable, List, Tuple
 
 
+##### checkpoint.py that support PyTorch AMP ########
+
+
 def detach_variable(inputs: Tuple[Any, ...]) -> Tuple[torch.Tensor, ...]:
     if isinstance(inputs, tuple):
         out = []

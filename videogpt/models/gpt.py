@@ -8,28 +8,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from videogpt.layers.norm import DiagNorm
+from videogpt.layers.norm import LayerNorm
 from videogpt.layers.attention import SelfAttentionModel
 from videogpt.layers.utils import shift_dim, LambdaModule
-from videogpt.common import SHAPE_THWL
 import videogpt.logger as logger
 
 MAX_SAMPLES_PER_BATCH = 32
 
 class ImageGPT(nn.Module):
     def __init__(
-        self,
-        shape: SHAPE_THWL,
-        in_features, out_features, proj_dim,
-        n_head, n_layer, n_vocab,
-        causal,
-        ff_mult,
-        attn_type,
-        dropout,
-        checkpoint,
-        attn_kwargs,
-        cond_types
-        ):
+        self, shape, in_features, out_features, proj_dim,
+        n_head, n_layer, n_vocab, ff_mult, attn_type,
+        dropout, checkpoint, attn_kwargs, cond_types):
         super().__init__()
         cond_dim = dict()
         self.cond_nets = nn.ModuleList()
@@ -37,27 +27,9 @@ class ImageGPT(nn.Module):
         for cond_type in cond_types:
             if cond_type.type == 'enc_attn':
                 self.cond_nets.append(cond_type.net)
-
-                if cond_type.agg_cond:
-                    # concatenate along the last dimension (channel dimension)
-                    if 'enc_attn' not in cond_dim:
-                        cond_dim['enc_attn'] = cond_type.out_size
-                    else:
-                        assert cond_dim['enc_attn'][:-1] == cond_type.out_size[:-1]
-                        cat_output_shape = (*cond_type.out_size[:-1],
-                                            cond_dim['enc_attn'][-1] + cond_type.out_size[-1])
-                        cond_dim['enc_attn'] = cat_output_shape
-                else:
-                    if 'enc_attn' not in cond_dim:
-                        cond_dim['enc_attn'] = list()
-                    cond_dim['enc_attn'].append(cond_type.out_size)
             else: # affine_norm
-                assert len(cond_type.out_size) == 1
-                self.cond_nets.append(nn.Identity())  # TODO: useuse .append(cond_type.net_constr())
-                # concatenate along the only one dimension
-                cat_cond_size = cond_dim.get(cond_type.type, (0,))
-                cat_cond_size = (cat_cond_size[0] + cond_type.out_size[0],)
-                cond_dim[cond_type.type] = cat_cond_size
+                self.cond_nets.append(nn.Identity())
+            cond_dim[cond_type.type] = cond_type.out_size
 
         embd_dim_prev, embd_dim = in_features, out_features
 
@@ -66,7 +38,6 @@ class ImageGPT(nn.Module):
         self.seq_len = np.product(shape)
         self.embd_dim = embd_dim
         self.n_vocab = n_vocab
-        self.causal = causal
         self.attn_type = attn_type
         self.cond_dim = cond_dim
 
@@ -81,7 +52,7 @@ class ImageGPT(nn.Module):
             cond_dim=cond_dim,
             n_head=n_head,
             n_layer=n_layer,
-            causal=causal,
+            causal=True,
             ff_mult=ff_mult,
             cond_types=cond_types,
             dropout=dropout,
@@ -90,7 +61,7 @@ class ImageGPT(nn.Module):
             attn_kwargs=attn_kwargs,
         )
 
-        self.norm = DiagNorm(embd_dim, cond_dim=cond_dim)
+        self.norm = LayerNorm(embd_dim, cond_dim=cond_dim)
 
         self.fc_out = nn.Linear(embd_dim, n_vocab, bias=False)
         self.fc_out.weight.data.copy_(torch.zeros(n_vocab, embd_dim))
@@ -216,18 +187,7 @@ class ImageGPT(nn.Module):
                 cond_out = cond_net(cond_type.preprocess_op(cond))
                 if isinstance(cond_out, dict):
                     cond_out = cond_out['features']
-
-                # feature concatenation
-                if cond_type.type not in cond_map:
-                    if cond_type.agg_cond:
-                        cond_map[cond_type.type] = cond_out
-                    else:
-                        cond_map[cond_type.type] = [cond_out]
-                else:
-                    if cond_type.agg_cond:
-                        cond_map[cond_type.type] = torch.cat((cond_map[cond_type.type], cond_out), dim=-1)
-                    else:
-                        cond_map[cond_type.type].append(cond_out)
+                cond_map[cond_type.type] = cond_out
 
             if decode_step is not None:
                 self.cond_cache = cond_map
