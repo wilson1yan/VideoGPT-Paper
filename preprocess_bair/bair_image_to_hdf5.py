@@ -46,3 +46,5 @@ def convert_data(split):
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', default='', help='base directory to save processed data')
 opt = parser.parse_args()
+convert_data('train')
+convert_data('test')
